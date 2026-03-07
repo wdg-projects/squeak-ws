@@ -3,6 +3,7 @@
 PROJECT_NAME           = squeakws
 PROJECT_BRIEF          = "C++20 WebSocket client (HTTP/HTTPS)"
 OUTPUT_DIRECTORY       = ./doc
+SHORT_NAMES            = YES
 BUILTIN_STL_SUPPORT    = YES
 INLINE_INFO            = NO
 RECURSIVE              = YES

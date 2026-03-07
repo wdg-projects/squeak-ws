@@ -4,3 +4,8 @@ example.cpp
 doc/
 Doxyfile.full
 gen-doxyfile.sh
+tests/node_modules
+tests/package-lock.json
+tests/runner
+tests/@*
+!tests/@*.cpp

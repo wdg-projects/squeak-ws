@@ -394,8 +394,11 @@ namespace SqueakWS
                 int value = 1;
                 setsockopt(sockfd, SOL_TCP, TCP_NODELAY, &value, sizeof(int));
         
-                if (connect(sockfd, (struct sockaddr *) &dest_addr, sizeof(struct sockaddr)) < 0)
-                    throw ConnectionError(std::format("Could not connect to https://{} ({}:{}): {}", saddr, port, hostname, strerror(errno)));
+                if (connect(sockfd, (struct sockaddr *) &dest_addr, sizeof(struct sockaddr)) < 0) {
+                    if (port != 80)
+                        throw ConnectionError(std::format("Could not connect to http://{}:{} ({}:{}): {}", hostname, port, saddr, port, strerror(errno)));
+                    throw ConnectionError(std::format("Could not connect to http://{} ({}:{}): {}", hostname, saddr, port, strerror(errno)));
+                }
             }
         
             inline ~TCPSocket()
@@ -475,15 +478,20 @@ namespace SqueakWS
                 int value = 1;
                 setsockopt(sockfd, SOL_TCP, TCP_NODELAY, &value, sizeof(int));
         
-                if (connect(sockfd, (struct sockaddr *) &dest_addr, sizeof(struct sockaddr)) < 0)
-                    throw ConnectionError(std::format("Could not connect to https://{} ({}:{}): {}", saddr, port, hostname, strerror(errno)));
+                if (connect(sockfd, (struct sockaddr *) &dest_addr, sizeof(struct sockaddr)) < 0) {
+                    if (port != 443)
+                        throw ConnectionError(std::format("Could not connect to https://{}:{} ({}:{}): {}", hostname, port, saddr, port, strerror(errno)));
+                    throw ConnectionError(std::format("Could not connect to https://{} ({}:{}): {}", hostname, saddr, port, strerror(errno)));
+                }
 
                 SSL_set_fd(ssl, sockfd);
         
                 if (SSL_connect(ssl) <= 0) {
                     MemoryBIO bio;
                     ERR_print_errors(bio.bio);
-                    throw SSLError(std::format("Could not connect (via TLS) to https://{} ({}:{}):\n{}", saddr, port, hostname, bio.collect()));
+                    if (port != 443)
+                        throw SSLError(std::format("Could not connect (via TLS) to https://{}:{} ({}:{}):\n{}", hostname, port, saddr, port, bio.collect()));
+                    throw SSLError(std::format("Could not connect (via TLS) to https://{} ({}:{}):\n{}", hostname, saddr, port, bio.collect()));
                 }
             }
         
@@ -765,7 +773,7 @@ namespace SqueakWS
 
                 if ((opcode >= 0x3 && opcode <= 0x7) || opcode >= 0xB)
                     throw CommunicationError("Corrupted frame (invalid opcode)");
-                
+
                 if (first)
                     kind = PacketKind(opcode);
                 else if (opcode != 0x0)

@@ -1,14 +1,6 @@
 #ifndef SQUEAKWS_HPP
 #define SQUEAKWS_HPP
 
-#include <algorithm>
-#include <cassert>
-#include <cstdlib>
-#include <exception>
-#include <format>
-#include <map>
-#include <mutex>
-
 #include <openssl/sha.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
@@ -23,11 +15,18 @@
 
 #include <unordered_set>
 #include <functional>
+#include <algorithm>
+#include <exception>
+#include <cassert>
+#include <cstdlib>
+#include <format>
 #include <thread>
 #include <memory>
 #include <string>
 #include <utility>
 #include <vector>
+#include <mutex>
+#include <map>
 #include <any>
 
 namespace SqueakWS
@@ -132,98 +131,102 @@ namespace SqueakWS
         template<typename T>
         concept CanIncrement = requires (T x, int n) { x += n; };
 
+        template<typename T>
+        concept IsBasicIterator = requires (T x) { *x; ++x; };
+
         template<typename U>
         class IteratorWrapper;
 
         template<typename U>
-        IteratorWrapper<U> &operator+=(IteratorWrapper<U> &obj, int n);
+        struct IteratorWrapperVTable
+        {
+            U &(*deref)(const IteratorWrapper<U> *obj);
+            void (*inc)(IteratorWrapper<U> *obj);
+            void (*incn)(IteratorWrapper<U> *obj, int);
+            ssize_t (*sub)(const IteratorWrapper<U> *obj, const IteratorWrapper<U>&);
+            bool (*eq)(const IteratorWrapper<U> *obj, const IteratorWrapper<U>&);
+
+            template<IsBasicIterator T>
+            IteratorWrapperVTable(T*)
+            {
+                deref = [](const IteratorWrapper<U> *obj) -> U& {
+                    return (U&) **std::any_cast<T>(&obj->iter);
+                };
+                inc = [](IteratorWrapper<U> *obj) -> void {
+                    ++*std::any_cast<T>(&obj->iter);
+                };
+                incn = [](IteratorWrapper<U> *obj, int n) -> void {
+                    if constexpr (CanIncrement<T>) {
+                        *std::any_cast<T>(&obj->iter) += n;
+                    } else {
+                        for (int i = 0; i < n; ++i)
+                            obj->inc();
+                    }
+                };
+                sub = [](const IteratorWrapper<U> *obj, const IteratorWrapper<U> &other) -> ssize_t {
+                    // TODO: Check if the other iterator is of the same kind
+                    const T &lhs = *std::any_cast<T>(&other.iter);
+                    const T &rhs = *std::any_cast<T>(&obj->iter);
+                    return rhs - lhs;
+                };
+                eq = [](const IteratorWrapper<U> *obj, const IteratorWrapper<U> &other) -> bool {
+                    // TODO: Check if the other iterator is of the same kind
+                    return *std::any_cast<T>(&obj->iter) == *std::any_cast<T>(&other.iter);
+                };
+            }
+        };
 
         template<typename U>
         class IteratorWrapper
         {
-            friend IteratorWrapper<U> &operator+=<>(IteratorWrapper<U> &obj, int n);
-        
+            friend IteratorWrapperVTable<U>;
+
             std::any iter;
-            std::function<U&()> deref;
-            std::function<void()> inc;
-            std::function<void(int)> incn;
-            std::function<int(const IteratorWrapper<U>&)> sub;
-            std::function<bool(const IteratorWrapper<U>&)> eq;
-        
-            std::function<void(IteratorWrapper<U> *)> generator;
+            const IteratorWrapperVTable<U> *vt;
+
         public:
-            template<typename T>
-            IteratorWrapper(T &&i) requires (!std::is_same_v<std::remove_reference_t<T>, IteratorWrapper<U>>)
+            template<typename V, typename T = std::decay_t<V>>
+            IteratorWrapper(V &&i) requires (IsBasicIterator<T> && !std::is_same_v<T, IteratorWrapper<U>>)
                 : iter(std::move(i))
             {
-                generator = [](IteratorWrapper<U> *obj) {
-                    obj->deref = [obj]() -> U& {
-                        return (U&) **std::any_cast<T>(&obj->iter);
-                    };
-                    obj->inc = [obj]() -> void {
-                        ++*std::any_cast<T>(&obj->iter);
-                    };
-                    obj->incn = [obj](int n) -> void {
-                        if constexpr (CanIncrement<T>) {
-                            *std::any_cast<T>(&obj->iter) += n;
-                        } else {
-                            for (int i = 0; i < n; ++i)
-                                obj->inc();
-                        }
-                    };
-                    obj->sub = [obj](const IteratorWrapper<U> &other) -> int {
-                        // TODO: Check if the other iterator is of the same kind
-                        const T &lhs = *std::any_cast<T>(&other.iter);
-                        const T &rhs = *std::any_cast<T>(&obj->iter);
-                        return rhs - lhs;
-                    };
-                    obj->eq = [obj](const IteratorWrapper<U> &other) -> bool {
-                        // TODO: Check if the other iterator is of the same kind
-                        return *std::any_cast<T>(&obj->iter) == *std::any_cast<T>(&other.iter);
-                    };
-                };
-                generator(this);
+                static const IteratorWrapperVTable<U> VT{(T*)nullptr};
+                vt = &VT;
             }
         
             IteratorWrapper(const IteratorWrapper<U> &other)
-                : iter(other.iter), generator(other.generator)
-            {
-                generator(this);
-            }
+                : iter(other.iter), vt(other.vt)
+            { }
         
             IteratorWrapper<U> &operator=(const IteratorWrapper<U> &other)
             {
                 iter = other.iter;
-                generator = other.generator;
-                generator(this);
+                vt = other.vt;
                 return *this;
             }
         
             IteratorWrapper(IteratorWrapper<U> &&other)
-                : iter(std::move(other.iter)), generator(other.generator)
-            {
-                generator(this);
-            }
+                : iter(std::move(other.iter)), vt(other.vt)
+            { }
         
             U &operator*() const
             {
-                return deref();
+                return vt->deref(this);
             }
         
             bool operator==(const IteratorWrapper<U> &other) const
             {
-                return eq(other);
+                return vt->eq(this, other);
             }
         
             IteratorWrapper<U> &operator++()
             {
-                inc();
+                vt->inc(*this);
                 return *this;
             }
         
-            int operator-(IteratorWrapper<U> &other)
+            ssize_t operator-(IteratorWrapper<U> &other) const
             {
-                return sub(other);
+                return vt->sub(this, other);
             }
         
             template<typename T>
@@ -231,14 +234,13 @@ namespace SqueakWS
             {
                 return std::any_cast<T>(iter);
             }
+
+            IteratorWrapper<U> &operator+=(int n)
+            {
+                vt->incn(this, n);
+                return *this;
+            }
         };
-        
-        template<typename U>
-        inline IteratorWrapper<U> &operator+=(IteratorWrapper<U> &obj, int n)
-        {
-            obj.incn(n);
-            return obj;
-        }
         
         using CharIteratorWrapper = IteratorWrapper<char>;
         using ConstCharIteratorWrapper = IteratorWrapper<const char>;
@@ -284,39 +286,35 @@ namespace SqueakWS
         {
         public:
             virtual int fd() = 0;
-            virtual CharIteratorWrapper read(CharIteratorWrapper begin, int n) = 0;
-            virtual ConstCharIteratorWrapper write(ConstCharIteratorWrapper begin, int n) = 0;
-        
-            inline void read_all(CharIteratorWrapper begin, int n)
+            virtual CharIteratorWrapper read(CharIteratorWrapper begin, CharIteratorWrapper end) = 0;
+            virtual ConstCharIteratorWrapper write(ConstCharIteratorWrapper begin, ConstCharIteratorWrapper end) = 0;
+
+            inline void read_all(CharIteratorWrapper begin, CharIteratorWrapper end)
             {
-                while (n > 0) {
-                    auto iter = read(begin, n);
-                    int nread = iter - begin;
-                    if (nread == 0)
+                while (begin != end) {
+                    auto iter = read(begin, end);
+                    if (iter == begin)
                         throw EOFError();
-                    n -= nread;
                     begin = iter;
                 }
             }
-        
-            inline void write_all(ConstCharIteratorWrapper begin, int n)
+
+            inline void write_all(ConstCharIteratorWrapper begin, ConstCharIteratorWrapper end)
             {
-                while (n > 0) {
-                    auto iter = write(begin, n);
-                    int nwritten = iter - begin;
-                    if (nwritten == 0)
+                while (begin != end) {
+                    auto iter = write(begin, end);
+                    if (iter - begin == 0)
                         throw EOFError();
-                    n -= nwritten;
                     begin = iter;
                 }
             }
-        
+
             inline std::string read_until(const std::string &delim, int limit = -1)
             {
                 std::string buf;
                 char c;
                 while (!buf.ends_with(delim)) {
-                    if (read(&c, 1) != &c + 1)
+                    if (read(&c, &c + 1) != &c + 1)
                         throw EOFError();
                     if (limit == -1 || buf.size() < limit + 2) {
                         buf.push_back(c);
@@ -411,18 +409,18 @@ namespace SqueakWS
                 other.sockfd = 0;
             }
         
-            inline CharIteratorWrapper read(CharIteratorWrapper begin, int n) override
+            inline CharIteratorWrapper read(CharIteratorWrapper begin, CharIteratorWrapper end) override
             {
                 if (!sockfd)
                     throw ClosedSocketError();
-                return begin += ::read(sockfd, &*begin, n);
+                return begin += ::read(sockfd, &*begin, end - begin);
             }
         
-            inline ConstCharIteratorWrapper write(ConstCharIteratorWrapper begin, int n) override
+            inline ConstCharIteratorWrapper write(ConstCharIteratorWrapper begin, ConstCharIteratorWrapper end) override
             {
                 if (!sockfd)
                     throw ClosedSocketError();
-                return begin += ::write(sockfd, &*begin, n);
+                return begin += ::write(sockfd, &*begin, end - begin);
             }
         
             inline int fd() override
@@ -505,18 +503,18 @@ namespace SqueakWS
                 other.ssl = nullptr;
             }
         
-            inline CharIteratorWrapper read(CharIteratorWrapper begin, int n) override
+            inline CharIteratorWrapper read(CharIteratorWrapper begin, CharIteratorWrapper end) override
             {
                 if (!ssl)
                     throw ClosedSocketError();
-                return begin += SSL_read(ssl, &*begin, n);
+                return begin += SSL_read(ssl, &*begin, end - begin);
             }
         
-            inline ConstCharIteratorWrapper write(ConstCharIteratorWrapper begin, int n) override
+            inline ConstCharIteratorWrapper write(ConstCharIteratorWrapper begin, ConstCharIteratorWrapper end) override
             {
                 if (!ssl)
                     throw ClosedSocketError();
-                return begin += SSL_write(ssl, &*begin, n);
+                return begin += SSL_write(ssl, &*begin, end - begin);
             }
         
             inline int fd() override
@@ -678,8 +676,8 @@ namespace SqueakWS
                 request.append("\r\n");
                 // std::cout << request << std::endl;
         
-                sock->write_all(request.begin(), request.size());
-                sock->write_all(payload.begin(), payload.size());
+                sock->write_all(request.begin(), request.end());
+                sock->write_all(payload.begin(), payload.end());
         
                 auto rsp = sock->read_until("\r\n", 64);
                 if (!rsp.starts_with("HTTP/1.1 "))
@@ -747,7 +745,7 @@ namespace SqueakWS
             bool fin, first = true;
             {
                 uint8_t head[2];
-                lower->read_all((char*)&head, 2);
+                lower->read_all((char*)&head, (char*)&head + 2);
                 uint8_t payload_len_raw[8] = { 0 };
 
                 bool mask = (head[1] >> 7) & 1;
@@ -764,10 +762,10 @@ namespace SqueakWS
 
                 uint64_t payload_length = head[1] & 0x7f;
                 if (payload_length == 126) {
-                    lower->read_all((char*)&payload_len_raw, 2);
+                    lower->read_all((char*)&payload_len_raw, (char*)&payload_len_raw + 8);
                     payload_length = ((uint16_t)payload_len_raw[0] << 8u) | (uint16_t)payload_len_raw[1];
                 } else if (payload_length == 127) {
-                    lower->read_all((char*)&payload_len_raw, 8);
+                    lower->read_all((char*)&payload_len_raw, (char*)&payload_len_raw + 8);
                     payload_length = (uint64_t)payload_len_raw[7]
                         | ((uint64_t)payload_len_raw[6] << 8u)
                         | ((uint64_t)payload_len_raw[5] << 16u)
@@ -786,11 +784,11 @@ namespace SqueakWS
 
                 uint8_t masking_key[4] = { 0 };
                 if (mask)
-                    lower->read_all((char*)&masking_key, 4);
+                    lower->read_all((char*)&masking_key, (char*)&masking_key + 4);
 
                 std::string payload;
                 payload.resize(payload_length);
-                lower->read_all(payload.begin(), payload_length);
+                lower->read_all(payload.begin(), payload.end());
                 if (mask)
                     for (int i = 0; i < payload.size(); ++i)
                         payload[i] = (char)(masking_key[i & 3] ^ (uint8_t)payload[i]);
@@ -823,22 +821,22 @@ namespace SqueakWS
                     head[8] = (payload_size >> 8u) & 0xff;
                     head[9] = payload_size & 0xff;
                     memset(&head[10], 0, 4);
-                    lower->write_all((char*)&head, 14);
+                    lower->write_all((char*)&head, (char*)&head + 14);
 
                 } else if (payload_size > 126ull) {
                     head[1] = 126 | 128;
                     head[2] = payload_size >> 8u;
                     head[3] = payload_size & 0xff;
                     memset(&head[4], 0, 4);
-                    lower->write_all((char*)&head, 8);
+                    lower->write_all((char*)&head, (char*)&head + 8);
 
                 } else {
                     head[1] = payload_size | 128;
                     memset(&head[2], 0, 4);
-                    lower->write_all((char*)&head, 6);
+                    lower->write_all((char*)&head, (char*)&head + 6);
                 }
 
-                lower->write_all(msg.substr(i, payload_size).begin(), payload_size);
+                lower->write_all(msg.begin() + i, msg.begin() + i + payload_size);
             }
         }
 

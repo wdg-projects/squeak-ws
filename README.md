@@ -8,16 +8,24 @@ You'll need to add OpenSSL to your libraries.
 ## Usage
 I'm not writing documentation yet, the example below should contain all functionality present so far.
 
-```
+```cpp
 
 #include <squeakws.hpp>
 
 #include <iostream>
+#include <chrono>
 
 int main()
 {
     try {
-        SqueakWS::WebSocket ws("wss://url.goes.here/some/path?to=resource");
+        SqueakWS::WebSocket ws("wss://url.goes.here/some/path?to=resource", {
+            .headers = {
+                { "X-Look-You-Can", "add custom headers" }
+            },
+            // These two are actually the default values
+            .payload_size_limit = 0x4'000'000,
+            .msg_size_limit = 0x100'000
+        });
 
         ws.on_message([](const std::string &msg, bool is_binary)
         {
@@ -36,6 +44,10 @@ int main()
     } catch (SqueakWS::BaseError &err) {
         std::cerr << "Could not create websocket: " << err.what() << std::endl;
     }
+
+    // Pretend to do some work so the program does not end immediately
+    using namespace std::chrono_literals;
+    std::this_thread::sleep_for(10s);
 }
 
 // There's more specific error types. Here's the hierarchy:

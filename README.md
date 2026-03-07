@@ -6,7 +6,7 @@ A single-header, minimal-dependency, C++20 implementation of a WebSocket client.
 You'll need to add OpenSSL to your libraries.
 
 ## Usage
-I'm not writing documentation yet, the example below should contain all functionality present so far.
+Rudimentary documentation can be generated with `doxygen`. The example below contains the most common functionality:
 
 ```cpp
 
@@ -49,18 +49,5 @@ int main()
     using namespace std::chrono_literals;
     std::this_thread::sleep_for(10s);
 }
-
-// There's more specific error types. Here's the hierarchy:
-// BaseError                  Base class for every error thrown directly by the library
-//   InitError                Something went wrong while initializing
-//   ClosedSocketError        Attempted operation on closed socket
-//   ArgumentError            Invalid argument to operation
-//   SSLError                 OpenSSL-related fault
-//   NetError                 Errors during network operations
-//     NameResolutionError    Could not resolve a hostname
-//     ConnectionError        Could not connect to peer
-//     CommunicationError     Errors during communication between peers
-//       EOFError             Unexpected end-of-file
-//       ResponseCodeError    WebSocket server gave unexpected HTTP response code (can be inspected with .response_code)
 
 ```

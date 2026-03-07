@@ -1,3 +1,6 @@
 .clangd
 example
 example.cpp
+doc/
+Doxyfile.full
+gen-doxyfile.sh

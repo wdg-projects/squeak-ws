@@ -29,6 +29,9 @@
 #include <map>
 #include <any>
 
+/*! \brief The main namespace for the library.
+
+*/
 namespace SqueakWS
 {
     class BaseError : public std::exception
@@ -718,13 +721,21 @@ namespace SqueakWS
         IMPL::init_openssl_done = 2;
     }
 
+    /*! \brief Additional configuration options for WebSocket.
+
+    */
     struct WebSocketConfig
     {
         std::vector<std::pair<std::string, std::string>> headers = {};
-        size_t payload_size_limit = 0x4'000'000;
-        size_t msg_size_limit = 0x100'000;
+        size_t payload_size_limit = 0x100'000;
+        size_t msg_size_limit = 0x4'000'000;
     };
 
+    /*! \brief A WebSocket client.
+
+        This class implements a WebSocket client.
+        Peer messages are handled via an auto-spawned thread, all callbacks will run within that helper thread.
+    */
     class WebSocket
     {
         IMPL::URL wsurl;
@@ -892,10 +903,37 @@ namespace SqueakWS
         }
 
     public:
+        /*! \brief Creates a WebSocket instance.
+
+            A connection with the peer will be established immediately; as such, this constructor may block for a long time.
+
+            \throw SSLError Couldn't initialize a TLS connection (may only be thrown when opening a secure WebSocket)
+            \throw NameResolutionError Couldn't resolve the server's hostname
+            \throw ConnectionError Couldn't establish a connection with the server
+            \throw ResponseCodeError The server responded with an unexpected HTTP response code
+            \throw CommunicationError Protocol error of some kind
+
+            \param[in] url The URL to connect to, as a string. Does not support username/password yet!
+            \param[in] cfg Additional configuration parameters.
+        */
         inline WebSocket(std::string url, WebSocketConfig cfg = {})
             : WebSocket(*IMPL::default_https_ssl_context, url, cfg)
         { }
 
+        /*! \brief Creates a WebSocket instance.
+
+            A connection with the peer will be established immediately; as such, this constructor may block for a long time.
+
+            \throw SSLError Couldn't initialize a TLS connection (may only be thrown when opening a secure WebSocket)
+            \throw NameResolutionError Couldn't resolve the server's hostname
+            \throw ConnectionError Couldn't establish a connection with the server
+            \throw ResponseCodeError The server responded with an unexpected HTTP response code
+            \throw CommunicationError Protocol error of some kind
+
+            \param[in] ctx An OpenSSL context to use when establishing a secure WebSocket connection
+            \param[in] url The URL to connect to, as a string. Does not support username/password yet!
+            \param[in] cfg Additional configuration parameters.
+        */
         inline WebSocket(SSL_CTX *ctx, std::string url, WebSocketConfig cfg = {})
             : wsurl{url, { "ws", "wss" }},
             payload_size_limit{cfg.payload_size_limit},
@@ -966,12 +1004,18 @@ namespace SqueakWS
             poll_recv_thread = std::make_unique<std::thread>([this]() { target_poll_recv(); });
             poll_recv_thread->detach();
         }
-
+        
         inline ~WebSocket()
         {
             close(1000);
         }
+        
+        /*! \brief Closes the connection gracefully.
 
+            \throw CommunicationError Protocol error of some kind
+
+            \param[in] code The reason code to give to the peer
+        */
         inline void close(uint16_t code)
         {
             std::scoped_lock lock{rwmutex};
@@ -981,23 +1025,45 @@ namespace SqueakWS
             send_packet(0x8, msg);
         }
 
+        /*! \brief Sends an UTF8-encoded string to the peer.
+
+            \throw CommunicationError Protocol error of some kind
+
+            \param[in] msg The text to transmit
+        */
         inline void send_text(std::string msg)
         {
             std::scoped_lock lock{rwmutex};
             send_packet(0x1, msg);
         }
 
+        /*! \brief Sends a binary blob to the peer.
+
+            \throw CommunicationError Protocol error of some kind
+
+            \param[in] msg The text to transmit
+        */
         inline void send_binary(std::string msg)
         {
             std::scoped_lock lock{rwmutex};
             send_packet(0x2, msg);
         }
 
+        /*! \brief Assigns the callback to invoke whenever a message is received.
+
+            \param[in] f The callback
+        */
         inline void on_message(std::function<void(const std::string&, bool)> f)
         {
             on_message_cb = f;
         }
 
+        /*! \brief Assigns the callback to invoke if the server requests that the connection be closed.
+
+            Note that this won't be called if you manually close the connection, nor will it be called if the connection is dropped ungracefully.
+
+            \param[in] f The callback
+        */
         inline void on_close(std::function<void(uint16_t)> f)
         {
             on_close_cb = f;

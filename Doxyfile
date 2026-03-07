@@ -1,0 +1,11 @@
+# GENERATED - DO NOT EDIT
+# Difference with default Doxyfile 1.14.0
+PROJECT_NAME           = squeakws
+PROJECT_BRIEF          = "C++20 WebSocket client (HTTP/HTTPS)"
+OUTPUT_DIRECTORY       = ./doc
+BUILTIN_STL_SUPPORT    = YES
+INLINE_INFO            = NO
+RECURSIVE              = YES
+EXCLUDE                = example.cpp
+EXCLUDE_SYMBOLS        = SqueakWS::IMPL
+GENERATE_MAN           = YES

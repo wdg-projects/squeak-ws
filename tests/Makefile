@@ -1,4 +1,4 @@
-TESTS = @terminate @wsconnect @wsconnect-invalid
+TESTS = @terminate @wsconnect @wsconnect-invalid @close
 
 CPP = g++
 CPPFLAGS = -g -std=c++20 -Wall -Wextra -pedantic

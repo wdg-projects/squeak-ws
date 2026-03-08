@@ -1105,6 +1105,8 @@ namespace SqueakWS
         inline void run()
         {
             std::scoped_lock runlock{runmutex};
+            if (!lower)
+                throw ClosedSocketError();
             struct pollfd pfds[] = { { lower->fd(), POLLIN, 0 } };
             while (true) {
                 if (poll(pfds, sizeof(pfds)/sizeof(pfds[0]), -1) < 0)

@@ -1066,9 +1066,11 @@ namespace SqueakWS
             \throw CommunicationError Protocol error of some kind
             \throw ClosedSocketError Operation on a closed WebSocket
 
-            \param[in] msg The text to transmit
+            \param[in] begin Iterator pointing to the first byte to send
+            \param[in] end Iterator pointing to one past the last byte to send
         */
-        inline void send_binary(char *begin, char *end)
+        void send_binary(const auto &begin, const auto &end)
+            requires (IMPL::IsBasicIterator<std::decay_t<decltype(begin)>> && IMPL::IsBasicIterator<std::decay_t<decltype(end)>>)
         {
             std::scoped_lock lock{rwmutex};
             if (!lower)

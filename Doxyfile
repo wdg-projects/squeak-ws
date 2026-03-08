@@ -7,6 +7,8 @@ SHORT_NAMES            = YES
 BUILTIN_STL_SUPPORT    = YES
 INLINE_INFO            = NO
 RECURSIVE              = YES
-EXCLUDE                = example.cpp
+EXCLUDE                = example.cpp \
+                         doc \
+                         tests
 EXCLUDE_SYMBOLS        = SqueakWS::IMPL
 GENERATE_MAN           = YES

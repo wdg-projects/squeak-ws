@@ -12,6 +12,7 @@
 namespace test {
     int main();
     extern std::string expected_stdout, expected_stderr;
+    extern int expected_runtime;
 }
 
 using ArgCommands = std::map<std::string, std::tuple<int, std::string, std::function<void(std::vector<std::string>)>>>;
@@ -38,7 +39,7 @@ std::vector<std::string> parseargs(ArgCommands rules, unsigned pos_min, unsigned
 
     std::vector<std::string> positional;
     std::vector<std::string> args(argv, argv+argc);
-    int i;
+    unsigned i;
     for (i = 1; i < args.size(); ++i) {
         if (args[i] == "--") {
             ++i;
@@ -93,7 +94,10 @@ int main(int argc, char **argv)
         } } },
         { "-E", { 0, "Outputs the expected stderr and exits without running the test.", [&mode](auto) {
             mode = 2;
-        } } }
+        } } },
+        { "-T", { 0, "Outputs the expected maximum runtime, in milliseconds, and exits without running the test.", [&mode](auto) {
+            mode = 3;
+        } } },
     }, 0, 0, argc, argv);
 
     switch (mode) {
@@ -109,6 +113,9 @@ int main(int argc, char **argv)
         return 0;
     case 2:
         std::cout << test::expected_stderr;
+        return 0;
+    case 3:
+        std::cout << test::expected_runtime;
         return 0;
     }
 }

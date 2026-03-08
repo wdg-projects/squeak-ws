@@ -23,8 +23,8 @@ int main()
                 { "X-Look-You-Can", "add custom headers" }
             },
             // These two are actually the default values
-            .payload_size_limit = 0x4'000'000,
-            .msg_size_limit = 0x100'000
+            .payload_size_limit = 0x100'000,
+            .msg_size_limit = 0x4'000'000
         });
 
         ws.on_message([](const std::string &msg, bool is_binary)

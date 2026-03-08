@@ -1,3 +1,4 @@
+#include <ctime>
 #include <sys/poll.h>
 #define RUNNER
 #include "util.cpp"
@@ -39,13 +40,18 @@ int spawn_bg(std::string path, std::vector<std::string> args, int *pstdout, int 
     return c;
 }
 
-std::tuple<int, std::string, std::string> spawn_and_collect(std::string path, std::vector<std::string> args)
+#define EXIT_TIMEOUT 1000  // specifically out of range for a process return code
+
+std::tuple<int, std::string, std::string> spawn_and_collect(std::string path, std::vector<std::string> args, int timeout_ms = -1)
 {
     int fdstdout, fdstderr;
     int c = spawn_bg(path, args, &fdstdout, &fdstderr);
 
     int stat;
     std::string pstdout, pstderr;
+    // int test::expected_runtime = 1000;
+    struct timespec start;
+    clock_gettime(CLOCK_MONOTONIC, &start);
     while (true) {
         struct pollfd fds[] = {
             { fdstdout, POLLIN, 0 },
@@ -75,6 +81,19 @@ std::tuple<int, std::string, std::string> spawn_and_collect(std::string path, st
             pstderr.append(std::string{ buf, (size_t)nread });
             x = true;
         }
+
+        if (timeout_ms != -1) {
+            struct timespec current;
+            clock_gettime(CLOCK_MONOTONIC, &current);
+
+            long long ms_elapsed = (current.tv_sec - start.tv_sec) * 1'000ll +
+                (current.tv_nsec - start.tv_nsec) / 1'000'000ll;
+            if (ms_elapsed > timeout_ms) {
+                kill(c, SIGKILL);
+                return { EXIT_TIMEOUT, pstdout, pstderr };
+            }
+        }
+
         if (!x) {
             int res = waitpid(c, &stat, WNOHANG);
             if (res < 0) {
@@ -96,7 +115,6 @@ int main(int argc, char **argv)
 {
     int c = spawn_bg("node", { "sampleserver.js" }, nullptr, nullptr);
 
-    int mode = 0;
     parseargs({ }, 0, 0, argc, argv);
 
     int total = 0, success = 0;
@@ -109,17 +127,21 @@ int main(int argc, char **argv)
 
             auto expected_stdout = std::get<1>(spawn_and_collect(entry.path().string(), { "-O" }));
             auto expected_stderr = std::get<1>(spawn_and_collect(entry.path().string(), { "-E" }));
+            auto expected_timeout = std::stoi(std::get<1>(spawn_and_collect(entry.path().string(), { "-T" })));
 
-            auto [ rc, pstdout, pstderr ] = spawn_and_collect(entry.path().string(), { });
-            if (rc != 0) {
+            auto [ rc, pstdout, pstderr ] = spawn_and_collect(entry.path().string(), { }, expected_timeout);
+            if (rc == EXIT_TIMEOUT) {
+                std::cout << std::format("FAIL (timeout)", rc) << std::endl;
                 std::cerr << pstderr << std::endl;
+            } else if (rc != 0) {
                 std::cout << std::format("FAIL (error code {})", rc) << std::endl;
-            } else if (pstdout != expected_stdout) {
-                std::cerr << pstdout << std::endl;
-                std::cout << "FAIL (stdout)" << std::endl;
-            } else if (pstderr != expected_stderr) {
                 std::cerr << pstderr << std::endl;
+            } else if (pstdout != expected_stdout) {
+                std::cout << "FAIL (stdout)" << std::endl;
+                std::cerr << pstdout << std::endl;
+            } else if (pstderr != expected_stderr) {
                 std::cout << "FAIL (stderr)" << std::endl;
+                std::cerr << pstderr << std::endl;
             } else {
                 std::cout << "OK" << std::endl;
                 ++success;

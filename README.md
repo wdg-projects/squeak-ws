@@ -41,13 +41,11 @@ int main()
         ws.send_text("Hii");
         ws.send_binary(std::string("\1\2\3", 3));
 
+        ws.run();
+
     } catch (SqueakWS::BaseError &err) {
         std::cerr << "Could not create websocket: " << err.what() << std::endl;
     }
-
-    // Pretend to do some work so the program does not end immediately
-    using namespace std::chrono_literals;
-    std::this_thread::sleep_for(10s);
 }
 
 ```

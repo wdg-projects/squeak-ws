@@ -7,5 +7,6 @@ int test::expected_runtime = 1000;
 int test::main()
 {
     SqueakWS::WebSocket ws("ws://localhost:1/");
+    ws.connect();
     return 0;
 }

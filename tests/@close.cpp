@@ -11,6 +11,7 @@ using namespace SqueakWS;
 int test::main()
 {
     WebSocket ws("ws://localhost:65500/");
+    ws.connect();
     ws.close(1000);
 
     EXPECT(ws.send_text("foo");)

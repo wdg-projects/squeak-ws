@@ -166,7 +166,7 @@ namespace SqueakWS
                         *std::any_cast<T>(&obj->iter) += n;
                     } else {
                         for (int i = 0; i < n; ++i)
-                            obj->inc();
+                            ++*std::any_cast<T>(&obj->iter);
                     }
                 };
                 sub = [](const IteratorWrapper<U> *obj, const IteratorWrapper<U> &other) -> ssize_t {
@@ -291,6 +291,8 @@ namespace SqueakWS
         class StreamSocket
         {
         public:
+            inline virtual ~StreamSocket() { }
+
             virtual int fd() = 0;
             virtual void close() = 0;
             virtual CharIteratorWrapper read(CharIteratorWrapper begin, CharIteratorWrapper end) = 0;
@@ -405,7 +407,7 @@ namespace SqueakWS
                 }
             }
 
-            inline ~TCPSocket()
+            inline virtual ~TCPSocket()
             {
                 close();
             }
@@ -449,12 +451,16 @@ namespace SqueakWS
 
         class TLSSocket : public StreamSocket
         {
+            static inline std::recursive_mutex big_openssl_mutex;  // some scary race condition shit is going on
+
             SSL_CTX *ctx;
             SSL *ssl;
         public:
             inline TLSSocket(SSL_CTX *ctx, std::string hostname, int port)
                 : ctx{ctx}, ssl{SSL_new(ctx)}
             {
+                std::scoped_lock ssllock{big_openssl_mutex};
+
                 if (!ssl) {
                     MemoryBIO bio;
                     ERR_print_errors(bio.bio);
@@ -505,7 +511,7 @@ namespace SqueakWS
                 }
             }
 
-            inline ~TLSSocket()
+            inline virtual ~TLSSocket()
             {
                 close();
             }
@@ -748,14 +754,14 @@ namespace SqueakWS
                 line_hex += std::format("{:02x} ", (uint8_t)c);
                 line_esc.push_back(c > 32 && c < 127 ? c : '.');
                 if (++i % bytes_per_line == 0) {
-                    res += std::format("{:04x} | {}| {}", i - bytes_per_line, line_hex, line_esc);
+                    res += std::format("{:04x} | {}| {}\n", i - bytes_per_line, line_hex, line_esc);
                     line_hex = line_esc = {};
                 }
             }
             if (line_esc.size()) {
                 for (int j = line_hex.size(); j < bytes_per_line * 3; ++j)
                     line_hex.push_back(' ');
-                res += std::format("{:04x} | {}| {}", i - (int)line_esc.size(), line_hex, line_esc);
+                res += std::format("{:04x} | {}| {}\n", i - (int)line_esc.size(), line_hex, line_esc);
             }
             return res;
         }
@@ -783,6 +789,8 @@ namespace SqueakWS
     */
     class WebSocket
     {
+        SSL_CTX *sslctx;
+        WebSocketConfig cfg;
         IMPL::URL wsurl;
         std::unique_ptr<IMPL::StreamSocket> lower;
         size_t payload_size_limit;
@@ -809,7 +817,7 @@ namespace SqueakWS
                 uint8_t opcode = head[0] & 15;
 
                 if ((opcode >= 0x3 && opcode <= 0x7) || opcode >= 0xB)
-                    throw CommunicationError("Corrupted frame (invalid opcode)");
+                    throw CommunicationError(std::format("Corrupted frame (invalid opcode 0x{:02x})", opcode));
 
                 if (first)
                     kind = PacketKind(opcode);
@@ -818,8 +826,9 @@ namespace SqueakWS
 
                 uint64_t payload_length = head[1] & 0x7f;
                 if (payload_length == 126) {
-                    lower->read_all((char*)&payload_len_raw, (char*)&payload_len_raw + 8);
+                    lower->read_all((char*)&payload_len_raw, (char*)&payload_len_raw + 2);
                     payload_length = ((uint16_t)payload_len_raw[0] << 8u) | (uint16_t)payload_len_raw[1];
+
                 } else if (payload_length == 127) {
                     lower->read_all((char*)&payload_len_raw, (char*)&payload_len_raw + 8);
                     payload_length = (uint64_t)payload_len_raw[7]
@@ -899,13 +908,7 @@ namespace SqueakWS
     public:
         /*! \brief Creates a WebSocket instance.
 
-            A connection with the peer will be established immediately; as such, this constructor may block for a long time.
-
-            \throw SSLError Couldn't initialize a TLS connection (may only be thrown when opening a secure WebSocket)
-            \throw NameResolutionError Couldn't resolve the server's hostname
-            \throw ConnectionError Couldn't establish a connection with the server
-            \throw ResponseCodeError The server responded with an unexpected HTTP response code
-            \throw CommunicationError Protocol error of some kind
+            No blocking operation is performed; call WebSocket#connect() to initiate a connection.
 
             \param[in] url The URL to connect to, as a string. Does not support username/password yet!
             \param[in] cfg Additional configuration parameters.
@@ -915,29 +918,85 @@ namespace SqueakWS
         { }
 
         /*! \brief Creates a WebSocket instance.
-
-            A connection with the peer will be established immediately; as such, this constructor may block for a long time.
-
-            \throw SSLError Couldn't initialize a TLS connection (may only be thrown when opening a secure WebSocket)
-            \throw NameResolutionError Couldn't resolve the server's hostname
-            \throw ConnectionError Couldn't establish a connection with the server
-            \throw ResponseCodeError The server responded with an unexpected HTTP response code
-            \throw CommunicationError Protocol error of some kind
+        
+            No blocking operation is performed; call WebSocket#connect() to initiate a connection.
 
             \param[in] ctx An OpenSSL context to use when establishing a secure WebSocket connection
             \param[in] url The URL to connect to, as a string. Does not support username/password yet!
             \param[in] cfg Additional configuration parameters.
         */
         inline WebSocket(SSL_CTX *ctx, std::string url, WebSocketConfig cfg = {})
-            : wsurl{url, { "ws", "wss" }},
-            payload_size_limit{cfg.payload_size_limit},
-            msg_size_limit{cfg.msg_size_limit}
+            : sslctx{ctx}, cfg{cfg},
+              wsurl{url, { "ws", "wss" }},
+              lower{nullptr},
+              payload_size_limit{cfg.payload_size_limit},
+              msg_size_limit{cfg.msg_size_limit}
         {
             if (wsurl.port == 0)
                 wsurl.port = wsurl.protocol == "wss" ? 443 : 80;
+        }
+
+        inline ~WebSocket()
+        {
+            std::scoped_lock lock{rwmutex};
+            if (lower)
+                close(1000);
+        }
+
+        inline WebSocket(const WebSocket &) = delete;
+
+        /*! \brief Moves the WebSocket
+
+            Take incredible care when moving a WebSocket. If a thread holds a reference to the old websocket, it will behave as if it were closed!
+            Moreover, this method requires that the WebSocket is not running. You must not move a WebSocket during the runtime of the WebSocket#run() method.
+
+            \throw ArgumentError Moving a WebSocket while it is being served
+
+            \param[in] other The object to move out from
+        */
+        inline WebSocket(WebSocket &&other)
+            : sslctx(other.sslctx),
+              cfg(other.cfg),
+              wsurl(other.wsurl),
+              payload_size_limit(other.payload_size_limit),
+              msg_size_limit(other.msg_size_limit)
+        {
+            std::scoped_lock lock1{other.rwmutex};
+            if (!other.runmutex.try_lock())
+                throw ArgumentError("The WebSocket is being served");
+
+            try {
+                lower = std::move(other.lower);
+                on_message_cb = std::move(other.on_message_cb);
+                on_close_cb = std::move(other.on_close_cb);
+            } catch (...) {
+                other.runmutex.unlock();
+                throw;
+            }
+            other.runmutex.unlock();
+        }
+
+        /*! \brief Initiates the connection with the given settings.
+
+            It is safe to invoke this method from a thread.
+
+            \throw ArgumentError Operation on an already opened socket
+            \throw SSLError Couldn't initialize a TLS connection (may only be thrown when opening a secure WebSocket)
+            \throw NameResolutionError Couldn't resolve the server's hostname
+            \throw ConnectionError Couldn't establish a connection with the server
+            \throw ResponseCodeError The server responded with an unexpected HTTP response code
+            \throw CommunicationError Protocol error of some kind
+
+            \param[in] code The reason code to give to the peer
+        */
+        inline void connect()
+        {
+            std::scoped_lock lock{rwmutex};
+            if (lower)
+                throw ArgumentError("WebSocket is already open");
 
             if (wsurl.protocol == "wss")
-                lower = std::make_unique<IMPL::TLSSocket>(ctx, wsurl.hostname, wsurl.port);
+                lower = std::make_unique<IMPL::TLSSocket>(sslctx, wsurl.hostname, wsurl.port);
             else
                 lower = std::make_unique<IMPL::TCPSocket>(wsurl.hostname, wsurl.port);
 
@@ -994,13 +1053,6 @@ namespace SqueakWS
 
             if (!got_upgrade || !got_connection || !got_challenge)
                 throw CommunicationError("Invalid server response (missing response headers; not a websocket endpoint?)");
-        }
-
-        inline ~WebSocket()
-        {
-            std::scoped_lock lock{rwmutex};
-            if (lower)
-                close(1000);
         }
 
         /*! \brief Closes the connection gracefully.
@@ -1117,10 +1169,17 @@ namespace SqueakWS
                     std::string msg;
                     {
                         std::scoped_lock lock{rwmutex};
-                        receive_packet(kind, msg);
+                        try {
+                            receive_packet(kind, msg);
+                        } catch (EOFError &) {
+                            if (on_close_cb)
+                                on_close_cb(1006);
+                            close_now();
+                            continue;
+                        }
 #ifdef SQUEAKWS_LOG_RX
                         std::cerr << "RX " << (int)kind << ": ===========================================" << std::endl
-                                  << IMPL::hexdump(msg, 8) << std::endl
+                                  << IMPL::hexdump(msg, 16) << std::endl
                                   << "===" << "=" <<       "=============================================" << std::endl;
 #endif
                         switch (kind) {
@@ -1141,7 +1200,7 @@ namespace SqueakWS
                     switch (kind) {
                         case PacketKind::CLOSE:
                             if (on_close_cb)
-                                on_close_cb((uint16_t)msg[0] << 8u | (uint16_t)msg[1]);
+                                on_close_cb(msg.size() >= 2 ? (uint16_t)msg[0] << 8u | (uint16_t)msg[1] : 1005);
                             close_now();
                             break;
                         case PacketKind::BINARY:

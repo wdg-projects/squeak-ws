@@ -42,7 +42,7 @@ int main()
         std::string data("\1\2\3", 3);
         ws.send_binary(data.begin(), data.end());
 
-        ws.run();
+        ws.run();   // You can also do WebSocket::run_many({ ws });
 
     } catch (SqueakWS::BaseError &err) {
         std::cerr << "Could not create websocket: " << err.what() << std::endl;

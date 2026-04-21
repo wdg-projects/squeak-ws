@@ -1,6 +1,7 @@
 #ifndef SQUEAKWS_HPP
 #define SQUEAKWS_HPP
 
+#include <deque>
 #include <openssl/sha.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
@@ -787,6 +788,73 @@ namespace SqueakWS
             }
         }
 
+        bool poll_nolock()
+        {
+            if (!lower)
+                return true;
+            struct pollfd pfds[] = { { lower->fd(), POLLIN, 0 } };
+            if (::poll(pfds, sizeof(pfds)/sizeof(pfds[0]), -1) < 0)
+                throw CommunicationError(std::format("Polling socket: {}", strerror(errno)));
+            return handle_poll(pfds[0]);
+        }
+
+        bool handle_poll(struct pollfd &pfd)
+        {
+            if (pfd.revents & POLLIN) {
+                PacketKind kind;
+                std::string msg;
+                {
+                    std::scoped_lock lock{rwmutex};
+                    try {
+                        receive_packet(kind, msg);
+                    } catch (EOFError &) {
+                        if (on_close_cb)
+                            on_close_cb(1006);
+                        close_now();
+                        return false;
+                    }
+#ifdef SQUEAKWS_LOG_RX
+                    std::cerr << "RX " << (int)kind << ": ===========================================" << std::endl
+                                << IMPL::hexdump(msg, 16) << std::endl
+                                << "===" << "=" <<       "=============================================" << std::endl;
+#endif
+                    switch (kind) {
+                        case PacketKind::CLOSE:
+                            send_packet(0x8, msg);
+                            break;
+                        case PacketKind::PING:
+                            send_packet(0xA, msg);
+                            break;
+                        case PacketKind::BINARY:
+                        case PacketKind::UTF8:
+                            break;
+                        case PacketKind::INVALID:
+                            assert(false);
+                    }
+                }
+
+                switch (kind) {
+                    case PacketKind::CLOSE:
+                        if (on_close_cb)
+                            on_close_cb(msg.size() >= 2 ? (uint16_t)msg[0] << 8u | (uint16_t)msg[1] : 1005);
+                        close_now();
+                        break;
+                    case PacketKind::BINARY:
+                        if (on_message_cb)
+                            on_message_cb(msg, false);
+                        break;
+                    case PacketKind::UTF8:
+                        if (on_message_cb)
+                            on_message_cb(msg, true);
+                        break;
+                    default:
+                        break;
+                }
+                return false;
+            }
+            return true;
+        }
+
     public:
         /*! \brief Creates a WebSocket instance.
 
@@ -1032,6 +1100,51 @@ namespace SqueakWS
             on_close_cb = f;
         }
 
+        /*! \brief Handle incoming messages of several WebSockets in a loop. Blocks until the connection is dropped.
+
+            It is safe to invoke this method from a thread. It is not reentrant, however; make sure it's running only once!
+        */
+        static inline void run_many(std::vector<WebSocket *> websockets)
+        {
+            std::vector<std::unique_ptr<std::scoped_lock<std::mutex>>> runlocks;
+
+            for (auto pwebsocket : websockets)
+                runlocks.emplace_back(std::make_unique<std::scoped_lock<std::mutex>>(pwebsocket->runmutex));
+
+            for (auto pwebsocket : websockets)
+                if (!pwebsocket->lower)
+                    throw ClosedSocketError();
+
+            while (websockets.size()) {
+                std::vector<struct pollfd> pfds;
+                for (auto pwebsocket : websockets)
+                    pfds.push_back(pollfd { pwebsocket->lower->fd(), POLLIN, 0 });
+
+                if (::poll(pfds.data(), pfds.size(), -1) < 0)
+                    throw CommunicationError(std::format("Polling socket: {}", strerror(errno)));
+
+                std::deque<int> to_remove;
+                for (unsigned i = 0; i < websockets.size(); ++i)
+                    if (websockets[i]->handle_poll(pfds[i]))
+                        to_remove.emplace_front(i);
+                
+                for (auto idx : to_remove)
+                    websockets.erase(websockets.begin() + idx);
+            }
+        }
+
+        /*! \brief Handle a single incoming message.
+
+            It is safe to invoke this method from a thread. It is not reentrant, however; make sure it's running only once!
+        */
+        inline void poll()
+        {
+            std::scoped_lock runlock{runmutex};
+            if (!lower)
+                throw ClosedSocketError();
+            poll_nolock();
+        }
+
         /*! \brief Handle incoming messages in a loop. Blocks until the connection is dropped.
 
             It is safe to invoke this method from a thread. It is not reentrant, however; make sure it's running only once!
@@ -1041,66 +1154,8 @@ namespace SqueakWS
             std::scoped_lock runlock{runmutex};
             if (!lower)
                 throw ClosedSocketError();
-            struct pollfd pfds[] = { { lower->fd(), POLLIN, 0 } };
-            while (true) {
-                if (poll(pfds, sizeof(pfds)/sizeof(pfds[0]), -1) < 0)
-                    throw CommunicationError(std::format("Polling socket: {}", strerror(errno)));
-
-                if (pfds[0].revents & POLLIN) {
-                    PacketKind kind;
-                    std::string msg;
-                    {
-                        std::scoped_lock lock{rwmutex};
-                        try {
-                            receive_packet(kind, msg);
-                        } catch (EOFError &) {
-                            if (on_close_cb)
-                                on_close_cb(1006);
-                            close_now();
-                            continue;
-                        }
-#ifdef SQUEAKWS_LOG_RX
-                        std::cerr << "RX " << (int)kind << ": ===========================================" << std::endl
-                                  << IMPL::hexdump(msg, 16) << std::endl
-                                  << "===" << "=" <<       "=============================================" << std::endl;
-#endif
-                        switch (kind) {
-                            case PacketKind::CLOSE:
-                                send_packet(0x8, msg);
-                                break;
-                            case PacketKind::PING:
-                                send_packet(0xA, msg);
-                                break;
-                            case PacketKind::BINARY:
-                            case PacketKind::UTF8:
-                                break;
-                            case PacketKind::INVALID:
-                                assert(false);
-                        }
-                    }
-
-                    switch (kind) {
-                        case PacketKind::CLOSE:
-                            if (on_close_cb)
-                                on_close_cb(msg.size() >= 2 ? (uint16_t)msg[0] << 8u | (uint16_t)msg[1] : 1005);
-                            close_now();
-                            break;
-                        case PacketKind::BINARY:
-                            if (on_message_cb)
-                                on_message_cb(msg, false);
-                            break;
-                        case PacketKind::UTF8:
-                            if (on_message_cb)
-                                on_message_cb(msg, true);
-                            break;
-                        default:
-                            break;
-                    }
-
-                } else {
-                    break;
-                }
-            }
+            while (!poll_nolock())
+                ;
         }
     };
 }

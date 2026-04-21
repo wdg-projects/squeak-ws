@@ -39,7 +39,8 @@ int main()
         });
 
         ws.send_text("Hii");
-        ws.send_binary(std::string("\1\2\3", 3));
+        std::string data("\1\2\3", 3);
+        ws.send_binary(data.begin(), data.end());
 
         ws.run();
 

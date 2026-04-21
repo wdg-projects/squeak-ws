@@ -15,7 +15,6 @@
 
 #include <unordered_set>
 #include <functional>
-#include <algorithm>
 #include <exception>
 #include <cassert>
 #include <cstdlib>
@@ -26,7 +25,6 @@
 #include <vector>
 #include <mutex>
 #include <map>
-#include <any>
 
 #ifdef SQUEAKWS_LOG_RX
 #include <iostream>
@@ -135,121 +133,7 @@ namespace SqueakWS
     namespace IMPL
     {
         template<typename T>
-        concept CanIncrement = requires (T x, int n) { x += n; };
-
-        template<typename T>
         concept IsBasicIterator = requires (T x) { *x; ++x; };
-
-        template<typename U>
-        class IteratorWrapper;
-
-        template<typename U>
-        struct IteratorWrapperVTable
-        {
-            U &(*deref)(const IteratorWrapper<U> *obj);
-            void (*inc)(IteratorWrapper<U> *obj);
-            void (*incn)(IteratorWrapper<U> *obj, int);
-            ssize_t (*sub)(const IteratorWrapper<U> *obj, const IteratorWrapper<U>&);
-            bool (*eq)(const IteratorWrapper<U> *obj, const IteratorWrapper<U>&);
-
-            template<IsBasicIterator T>
-            IteratorWrapperVTable(T*)
-            {
-                deref = [](const IteratorWrapper<U> *obj) -> U& {
-                    return (U&) **std::any_cast<T>(&obj->iter);
-                };
-                inc = [](IteratorWrapper<U> *obj) -> void {
-                    ++*std::any_cast<T>(&obj->iter);
-                };
-                incn = [](IteratorWrapper<U> *obj, int n) -> void {
-                    if constexpr (CanIncrement<T>) {
-                        *std::any_cast<T>(&obj->iter) += n;
-                    } else {
-                        for (int i = 0; i < n; ++i)
-                            ++*std::any_cast<T>(&obj->iter);
-                    }
-                };
-                sub = [](const IteratorWrapper<U> *obj, const IteratorWrapper<U> &other) -> ssize_t {
-                    // TODO: Check if the other iterator is of the same kind
-                    const T &lhs = *std::any_cast<T>(&other.iter);
-                    const T &rhs = *std::any_cast<T>(&obj->iter);
-                    return rhs - lhs;
-                };
-                eq = [](const IteratorWrapper<U> *obj, const IteratorWrapper<U> &other) -> bool {
-                    // TODO: Check if the other iterator is of the same kind
-                    return *std::any_cast<T>(&obj->iter) == *std::any_cast<T>(&other.iter);
-                };
-            }
-        };
-
-        template<typename U>
-        class IteratorWrapper
-        {
-            friend IteratorWrapperVTable<U>;
-
-            std::any iter;
-            const IteratorWrapperVTable<U> *vt;
-
-        public:
-            template<typename V, typename T = std::decay_t<V>>
-            IteratorWrapper(V &&i) requires (IsBasicIterator<T> && !std::is_same_v<T, IteratorWrapper<U>>)
-                : iter(std::move(i))
-            {
-                static const IteratorWrapperVTable<U> VT{(T*)nullptr};
-                vt = &VT;
-            }
-
-            IteratorWrapper(const IteratorWrapper<U> &other)
-                : iter(other.iter), vt(other.vt)
-            { }
-
-            IteratorWrapper<U> &operator=(const IteratorWrapper<U> &other)
-            {
-                iter = other.iter;
-                vt = other.vt;
-                return *this;
-            }
-
-            IteratorWrapper(IteratorWrapper<U> &&other)
-                : iter(std::move(other.iter)), vt(other.vt)
-            { }
-
-            U &operator*() const
-            {
-                return vt->deref(this);
-            }
-
-            bool operator==(const IteratorWrapper<U> &other) const
-            {
-                return vt->eq(this, other);
-            }
-
-            IteratorWrapper<U> &operator++()
-            {
-                vt->inc(*this);
-                return *this;
-            }
-
-            ssize_t operator-(IteratorWrapper<U> &other) const
-            {
-                return vt->sub(this, other);
-            }
-
-            template<typename T>
-            T as()
-            {
-                return std::any_cast<T>(iter);
-            }
-
-            IteratorWrapper<U> &operator+=(int n)
-            {
-                vt->incn(this, n);
-                return *this;
-            }
-        };
-
-        using CharIteratorWrapper = IteratorWrapper<char>;
-        using ConstCharIteratorWrapper = IteratorWrapper<const char>;
 
         struct MemoryBIO
         {
@@ -295,10 +179,10 @@ namespace SqueakWS
 
             virtual int fd() = 0;
             virtual void close() = 0;
-            virtual CharIteratorWrapper read(CharIteratorWrapper begin, CharIteratorWrapper end) = 0;
-            virtual ConstCharIteratorWrapper write(ConstCharIteratorWrapper begin, ConstCharIteratorWrapper end) = 0;
+            virtual char *read(char *begin, char *end) = 0;
+            virtual const char *write(const char *begin, const char *end) = 0;
 
-            inline void read_all(CharIteratorWrapper begin, CharIteratorWrapper end)
+            inline void read_all(char *begin, char *end)
             {
                 while (begin != end) {
                     auto iter = read(begin, end);
@@ -308,7 +192,7 @@ namespace SqueakWS
                 }
             }
 
-            inline void write_all(ConstCharIteratorWrapper begin, ConstCharIteratorWrapper end)
+            inline void write_all(const char *begin, const char *end)
             {
                 while (begin != end) {
                     auto iter = write(begin, end);
@@ -401,9 +285,8 @@ namespace SqueakWS
                 setsockopt(sockfd, SOL_TCP, TCP_NODELAY, &value, sizeof(int));
 
                 if (connect(sockfd, (struct sockaddr *) &dest_addr, sizeof(struct sockaddr)) < 0) {
-                    if (port != 80)
-                        throw ConnectionError(std::format("Could not connect to http://{}:{} ({}:{}): {}", hostname, port, saddr, port, strerror(errno)));
-                    throw ConnectionError(std::format("Could not connect to http://{} ({}:{}): {}", hostname, saddr, port, strerror(errno)));
+                    auto port_part = port != 80 ? std::format(":{}", port) : "";
+                    throw ConnectionError(std::format("Could not connect to http://{}{} ({}:{}): {}", hostname, port_part, saddr, port, strerror(errno)));
                 }
             }
 
@@ -420,14 +303,14 @@ namespace SqueakWS
                 other.sockfd = 0;
             }
 
-            inline CharIteratorWrapper read(CharIteratorWrapper begin, CharIteratorWrapper end) override
+            inline char *read(char *begin, char *end) override
             {
                 if (!sockfd)
                     throw ClosedSocketError();
                 return begin += ::read(sockfd, &*begin, end - begin);
             }
 
-            inline ConstCharIteratorWrapper write(ConstCharIteratorWrapper begin, ConstCharIteratorWrapper end) override
+            inline const char *write(const char *begin, const char *end) override
             {
                 if (!sockfd)
                     throw ClosedSocketError();
@@ -495,9 +378,8 @@ namespace SqueakWS
                 setsockopt(sockfd, SOL_TCP, TCP_NODELAY, &value, sizeof(int));
 
                 if (connect(sockfd, (struct sockaddr *) &dest_addr, sizeof(struct sockaddr)) < 0) {
-                    if (port != 443)
-                        throw ConnectionError(std::format("Could not connect to https://{}:{} ({}:{}): {}", hostname, port, saddr, port, strerror(errno)));
-                    throw ConnectionError(std::format("Could not connect to https://{} ({}:{}): {}", hostname, saddr, port, strerror(errno)));
+                    auto port_part = port != 443 ? std::format(":{}", port) : "";
+                    throw ConnectionError(std::format("Could not connect to https://{}{} ({}:{}): {}", hostname, port_part, saddr, port, strerror(errno)));
                 }
 
                 SSL_set_fd(ssl, sockfd);
@@ -525,14 +407,14 @@ namespace SqueakWS
                 other.ssl = nullptr;
             }
 
-            inline CharIteratorWrapper read(CharIteratorWrapper begin, CharIteratorWrapper end) override
+            inline char *read(char *begin, char *end) override
             {
                 if (!ssl)
                     throw ClosedSocketError();
                 return begin += SSL_read(ssl, &*begin, end - begin);
             }
 
-            inline ConstCharIteratorWrapper write(ConstCharIteratorWrapper begin, ConstCharIteratorWrapper end) override
+            inline const char *write(const char *begin, const char *end) override
             {
                 if (!ssl)
                     throw ClosedSocketError();
@@ -709,8 +591,8 @@ namespace SqueakWS
                 request.append("\r\n");
                 // std::cout << request << std::endl;
 
-                sock->write_all(request.begin(), request.end());
-                sock->write_all(payload.begin(), payload.end());
+                sock->write_all(request.data(), request.data() + request.size());
+                sock->write_all(payload.data(), payload.data() + payload.size());
 
                 auto rsp = sock->read_until("\r\n", 64);
                 if (!rsp.starts_with("HTTP/1.1 "))
@@ -853,7 +735,7 @@ namespace SqueakWS
 
                 std::string payload;
                 payload.resize(payload_length);
-                lower->read_all(payload.begin(), payload.end());
+                lower->read_all(payload.data(), payload.data() + payload.size());
                 if (mask)
                     for (size_t i = 0; i < payload.size(); ++i)
                         payload[i] = (char)(masking_key[i & 3] ^ (uint8_t)payload[i]);
@@ -901,7 +783,7 @@ namespace SqueakWS
                     lower->write_all((char*)&head, (char*)&head + 6);
                 }
 
-                lower->write_all(msg.begin() + i, msg.begin() + i + payload_size);
+                lower->write_all(msg.data() + i, msg.data() + i + payload_size);
             }
         }
 

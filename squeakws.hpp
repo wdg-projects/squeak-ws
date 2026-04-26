@@ -14,6 +14,7 @@
 #include <netinet/tcp.h>
 #include <netdb.h>
 
+#include <tuple>
 #include <unordered_set>
 #include <functional>
 #include <exception>
@@ -50,81 +51,28 @@ namespace SqueakWS
         }
     };
 
-    class InitError : public BaseError
+    struct ClosedSocketError : public BaseError
     {
-    public:
-        InitError(const std::string &err)
-            : BaseError(err)
-        { }
+        using BaseError::BaseError;
+        ClosedSocketError() : BaseError("Closed socket") { }
     };
-
-    class ClosedSocketError : public BaseError
-    {
-    public:
-        ClosedSocketError(const std::string &err = "Closed socket")
-            : BaseError(err)
-        { }
-    };
-
-    class ArgumentError : public BaseError
-    {
-    public:
-        ArgumentError(const std::string &err)
-            : BaseError(err)
-        { }
-    };
-
-    class SSLError : public BaseError
-    {
-        public:
-        SSLError(const std::string &err)
-            : BaseError(err)
-        { }
-    };
-
-    class NetError : public BaseError
-    {
-    public:
-        NetError(const std::string &err)
-            : BaseError{err}
-        { }
-    };
+    struct InitError : public BaseError { using BaseError::BaseError; };
+    struct ArgumentError : public BaseError { using BaseError::BaseError; };
+    struct SSLError : public BaseError { using BaseError::BaseError; };
+    struct NetError : public BaseError { using BaseError::BaseError; };
     
-    class NameResolutionError : public NetError
+    struct NameResolutionError : public NetError { using NetError::NetError; };
+    struct ConnectionError : public NetError { using NetError::NetError; };
+    struct CommunicationError : public NetError { using NetError::NetError; };
+
+    struct EOFError : public CommunicationError
     {
-        public:
-        NameResolutionError(const std::string &err)
-            : NetError(err)
-        { }
+        using CommunicationError::CommunicationError;
+        EOFError() : CommunicationError("EOF") { }
     };
 
-    class ConnectionError : public NetError
+    struct ResponseCodeError : public CommunicationError
     {
-    public:
-        ConnectionError(const std::string &err)
-            : NetError(err)
-        { }
-    };
-    
-    class CommunicationError : public NetError
-    {
-        public:
-        CommunicationError(const std::string &err)
-            : NetError(err)
-        { }
-    };
-
-    class EOFError : public CommunicationError
-    {
-    public:
-        EOFError(const std::string &err = "EOF")
-            : CommunicationError(err)
-        { }
-    };
-
-    class ResponseCodeError : public CommunicationError
-    {
-    public:
         int response_code;
         ResponseCodeError(const std::string &err, int response_code)
             : CommunicationError(err), response_code(response_code)
@@ -135,43 +83,6 @@ namespace SqueakWS
     {
         template<typename T>
         concept IsBasicIterator = requires (T x) { *x; ++x; };
-
-        struct MemoryBIO
-        {
-            BIO *bio;
-
-            inline MemoryBIO()
-                : bio{BIO_new(BIO_s_mem())}
-            {
-                if (!bio)
-                    throw std::bad_alloc();
-            }
-
-            inline ~MemoryBIO()
-            {
-                BIO_free(bio);
-            }
-
-            inline std::string collect()
-            {
-                std::string res;
-                collect(res);
-                return res;
-            }
-
-            inline void collect(std::string &into)
-            {
-                const int BUFSIZE = 1024;
-
-                BIO_seek(bio, 0);
-                int read;
-                std::unique_ptr<char[]> buf = std::make_unique<char[]>(BUFSIZE);
-                do {
-                    read = BIO_read(bio, &buf[0], BUFSIZE);
-                    into.append({ &buf[0], (size_t)read });
-                } while (read == BUFSIZE);
-            }
-        };
 
         class StreamSocket
         {
@@ -210,14 +121,15 @@ namespace SqueakWS
                 while (!buf.ends_with(delim)) {
                     if (read(&c, &c + 1) != &c + 1)
                         throw EOFError();
-                    if (limit == SIZE_MAX || buf.size() < limit + 2) {
+                    if (limit == SIZE_MAX || buf.size() < limit + delim.size()) {
                         buf.push_back(c);
                     } else {
-                        buf[buf.size() - 2] = buf[buf.size() - 1];
+                        for (auto i = delim.size(); i > 1; ++i)
+                            buf[buf.size() - i] = buf[buf.size() - i + 1];
                         buf[buf.size() - 1] = c;
                     }
                 }
-                return buf.substr(0, buf.size() - 2);
+                return buf.substr(0, buf.size() - delim.size());
             }
         };
 
@@ -261,35 +173,41 @@ namespace SqueakWS
             }
         } inline default_https_ssl_context;
 
+        static inline std::tuple<int, std::string> tcp_connect(const std::string &hostname, uint16_t port, std::string_view proto, bool err_omit_port)
+        {
+            struct hostent *host;
+            if (!(host = gethostbyname(hostname.c_str())))    // FIXME: Don't use gethostbyname
+                throw NameResolutionError(std::format("Could not resolve {}: {}", hostname, strerror(errno)));
+
+            int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+            if (sockfd < 0)
+                throw ConnectionError(std::format("Could not create socket: {}", strerror(errno)));
+
+            struct sockaddr_in dest_addr = { .sin_family = AF_INET, .sin_port = htons(port), .sin_addr = { (in_addr_t)*(long*)host->h_addr }, .sin_zero = {} };
+            memset(&dest_addr.sin_zero, 0, sizeof(dest_addr.sin_zero));
+
+            char cstr_addr[64] = { 0 };
+            inet_ntop(AF_INET, &dest_addr.sin_addr, cstr_addr, sizeof(cstr_addr));
+
+            int value = 1;
+            setsockopt(sockfd, SOL_TCP, TCP_NODELAY, &value, sizeof(int));
+
+            if (connect(sockfd, (struct sockaddr *) &dest_addr, sizeof(struct sockaddr)) < 0) {
+                close(sockfd);
+                auto port_part = err_omit_port ? "" : std::format(":{}", port);
+                throw ConnectionError(std::format("Could not connect to {}://{}{} ({}:{}): {}", proto, hostname, port_part, cstr_addr, port, strerror(errno)));
+            }
+
+            return { sockfd, cstr_addr };
+        }
+
         class TCPSocket : public StreamSocket
         {
             int sockfd = 0;
         public:
             inline TCPSocket(std::string hostname, int port)
-            {
-                struct hostent *host;
-                if (!(host = gethostbyname(hostname.c_str())))    // FIXME: Don't use gethostbyname
-                    throw NameResolutionError(std::format("Could not resolve {}: {}", hostname, strerror(errno)));
-
-                sockfd = socket(AF_INET, SOCK_STREAM, 0);
-
-                struct sockaddr_in dest_addr;
-                dest_addr.sin_family = AF_INET;
-                dest_addr.sin_port = htons(port);
-                dest_addr.sin_addr.s_addr = *(long*)(host->h_addr);
-                memset(&dest_addr.sin_zero, 0, sizeof(dest_addr.sin_zero));
-
-                char saddr[64];
-                strncpy(saddr, inet_ntoa(dest_addr.sin_addr), 64);
-
-                int value = 1;
-                setsockopt(sockfd, SOL_TCP, TCP_NODELAY, &value, sizeof(int));
-
-                if (connect(sockfd, (struct sockaddr *) &dest_addr, sizeof(struct sockaddr)) < 0) {
-                    auto port_part = port != 80 ? std::format(":{}", port) : "";
-                    throw ConnectionError(std::format("Could not connect to http://{}{} ({}:{}): {}", hostname, port_part, saddr, port, strerror(errno)));
-                }
-            }
+                : sockfd(std::get<0>(tcp_connect(hostname, port, "http", port == 80)))
+            { }
 
             inline virtual ~TCPSocket()
             {
@@ -333,6 +251,29 @@ namespace SqueakWS
             }
         };
 
+        static inline std::string get_openssl_errors()
+        {
+            BIO *bio = BIO_new(BIO_s_mem());
+            if (!bio)
+                throw std::bad_alloc();
+
+            ERR_print_errors(bio);
+
+            std::string res;
+
+            const int BUFSIZE = 1024;
+            BIO_seek(bio, 0);
+            int read;
+            std::unique_ptr<char[]> buf = std::make_unique<char[]>(BUFSIZE);
+            do {
+                read = BIO_read(bio, &buf[0], BUFSIZE);
+                res.append({ &buf[0], (size_t)read });
+            } while (read == BUFSIZE);
+
+            BIO_free(bio);
+            return res;
+        }
+
         class TLSSocket : public StreamSocket
         {
             static inline std::recursive_mutex big_openssl_mutex;  // some scary race condition shit is going on
@@ -345,52 +286,22 @@ namespace SqueakWS
             {
                 std::scoped_lock ssllock{big_openssl_mutex};
 
-                if (!ssl) {
-                    MemoryBIO bio;
-                    ERR_print_errors(bio.bio);
-                    throw SSLError(std::format("Could not create SSL object:\n{}", bio.collect()));
-                }
+                if (!ssl)
+                    throw SSLError(std::format("Could not create SSL object:\n{}", get_openssl_errors()));
 
-                if (!X509_VERIFY_PARAM_set1_host(SSL_get0_param(ssl), hostname.data(), hostname.size())) {
-                    MemoryBIO bio;
-                    ERR_print_errors(bio.bio);
-                    throw SSLError(std::format("Could not enable hostname verification:\n{}", bio.collect()));
-                }
+                if (!X509_VERIFY_PARAM_set1_host(SSL_get0_param(ssl), hostname.data(), hostname.size()))
+                    throw SSLError(std::format("Could not enable hostname verification:\n{}", get_openssl_errors()));
 
                 SSL_set_verify(ssl, SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT, NULL);
                 SSL_set_tlsext_host_name(ssl, hostname.c_str());
 
-                struct hostent *host;
-                if (!(host = gethostbyname(hostname.c_str())))    // TODO: Don't use gethostbyname
-                    throw NameResolutionError(std::format("Could not resolve {}: {}", hostname, strerror(errno)));
-
-                int sockfd = socket(AF_INET, SOCK_STREAM, 0);
-
-                struct sockaddr_in dest_addr;
-                dest_addr.sin_family = AF_INET;
-                dest_addr.sin_port = htons(port);
-                dest_addr.sin_addr.s_addr = *(long*)(host->h_addr);
-                memset(&dest_addr.sin_zero, 0, sizeof(dest_addr.sin_zero));
-
-                char saddr[64];
-                strncpy(saddr, inet_ntoa(dest_addr.sin_addr), 64);
-
-                int value = 1;
-                setsockopt(sockfd, SOL_TCP, TCP_NODELAY, &value, sizeof(int));
-
-                if (connect(sockfd, (struct sockaddr *) &dest_addr, sizeof(struct sockaddr)) < 0) {
-                    auto port_part = port != 443 ? std::format(":{}", port) : "";
-                    throw ConnectionError(std::format("Could not connect to https://{}{} ({}:{}): {}", hostname, port_part, saddr, port, strerror(errno)));
-                }
+                auto [sockfd, saddr] = tcp_connect(hostname, port, "https", 443);
 
                 SSL_set_fd(ssl, sockfd);
 
                 if (SSL_connect(ssl) <= 0) {
-                    MemoryBIO bio;
-                    ERR_print_errors(bio.bio);
-                    if (port != 443)
-                        throw SSLError(std::format("Could not connect (via TLS) to https://{}:{} ({}:{}):\n{}", hostname, port, saddr, port, bio.collect()));
-                    throw SSLError(std::format("Could not connect (via TLS) to https://{} ({}:{}):\n{}", hostname, saddr, port, bio.collect()));
+                    auto port_part = port != 443 ? std::format(":{}", port) : "";
+                    throw SSLError(std::format("Could not connect (via TLS) to https://{}{} ({}:{}):\n{}", hostname, port_part, saddr, port, get_openssl_errors()));
                 }
             }
 
@@ -557,7 +468,6 @@ namespace SqueakWS
 
             inline void header(const std::string &key, const std::string &value)
             {
-                // rqheaders.emplace_back(key, value);
                 rqheaders[key] = value;
             }
 
@@ -590,7 +500,6 @@ namespace SqueakWS
                     request.append("\r\n");
                 }
                 request.append("\r\n");
-                // std::cout << request << std::endl;
 
                 sock->write_all(request.data(), request.data() + request.size());
                 sock->write_all(payload.data(), payload.data() + payload.size());
@@ -676,8 +585,6 @@ namespace SqueakWS
         WebSocketConfig cfg;
         IMPL::URL wsurl;
         std::unique_ptr<IMPL::StreamSocket> lower;
-        size_t payload_size_limit;
-        size_t msg_size_limit;
         std::recursive_mutex rwmutex;
         std::mutex runmutex;
         std::function<void(const std::string&, bool)> on_message_cb;
@@ -690,7 +597,7 @@ namespace SqueakWS
             msg = {};
 
             bool fin, first = true;
-            {
+            do {
                 uint8_t head[2];
                 lower->read_all((char*)&head, (char*)&head + 2);
                 uint8_t payload_len_raw[8] = { 0 };
@@ -724,11 +631,11 @@ namespace SqueakWS
                         | ((uint64_t)payload_len_raw[0] << 56u);
                 }
 
-                if (msg.size() + payload_length > msg_size_limit)
-                    throw CommunicationError(std::format("Receiving message at least {} bytes long, over the set limit of {} bytes", msg.size() + payload_length, msg_size_limit));
+                if (msg.size() + payload_length > cfg.msg_size_limit)
+                    throw CommunicationError(std::format("Receiving message at least {} bytes long, over the set limit of {} bytes", msg.size() + payload_length, cfg.msg_size_limit));
 
-                if (payload_length >= payload_size_limit)
-                    throw CommunicationError(std::format("Receiving frame {} bytes long, over the set limit of {} bytes", payload_length, payload_size_limit));
+                if (payload_length >= cfg.payload_size_limit)
+                    throw CommunicationError(std::format("Receiving frame {} bytes long, over the set limit of {} bytes", payload_length, cfg.payload_size_limit));
 
                 uint8_t masking_key[4] = { 0 };
                 if (mask)
@@ -766,8 +673,8 @@ namespace SqueakWS
                     head[5] = (payload_size >> 32u) & 0xff;
                     head[6] = (payload_size >> 24u) & 0xff;
                     head[7] = (payload_size >> 16u) & 0xff;
-                    head[8] = (payload_size >> 8u) & 0xff;
-                    head[9] = payload_size & 0xff;
+                    head[8] = (payload_size >> 8u ) & 0xff;
+                    head[9] =  payload_size         & 0xff;
                     memset(&head[10], 0, 4);
                     lower->write_all((char*)&head, (char*)&head + 14);
 
@@ -878,9 +785,7 @@ namespace SqueakWS
         inline WebSocket(SSL_CTX *ctx, std::string url, WebSocketConfig cfg = {})
             : sslctx{ctx}, cfg{cfg},
               wsurl{url, { "ws", "wss" }},
-              lower{nullptr},
-              payload_size_limit{cfg.payload_size_limit},
-              msg_size_limit{cfg.msg_size_limit}
+              lower{nullptr}
         {
             if (wsurl.port == 0)
                 wsurl.port = wsurl.protocol == "wss" ? 443 : 80;
@@ -905,11 +810,7 @@ namespace SqueakWS
             \param[in] other The object to move out from
         */
         inline WebSocket(WebSocket &&other)
-            : sslctx(other.sslctx),
-              cfg(other.cfg),
-              wsurl(other.wsurl),
-              payload_size_limit(other.payload_size_limit),
-              msg_size_limit(other.msg_size_limit)
+            : sslctx(other.sslctx), cfg(other.cfg), wsurl(other.wsurl)
         {
             std::scoped_lock lock1{other.rwmutex};
             if (!other.runmutex.try_lock())
@@ -1019,9 +920,7 @@ namespace SqueakWS
             std::scoped_lock lock{rwmutex};
             if (!lower)
                 throw ClosedSocketError();
-            std::string msg;
-            msg.push_back((char)(uint8_t)((uint16_t)code >> 8u));
-            msg.push_back((char)(uint8_t)(uint16_t)code);
+            std::string msg = { (char)(uint8_t)(code >> 8u), (char)(uint8_t)code };
             send_packet(0x8, msg);
             close_now();
         }
@@ -1084,10 +983,7 @@ namespace SqueakWS
 
             \param[in] f The callback
         */
-        inline void on_message(std::function<void(const std::string&, bool)> f)
-        {
-            on_message_cb = f;
-        }
+        inline void on_message(std::function<void(const std::string&, bool)> f) { on_message_cb = f; }
 
         /*! \brief Assigns the callback to invoke if the server requests that the connection be closed.
 
@@ -1095,10 +991,7 @@ namespace SqueakWS
 
             \param[in] f The callback
         */
-        inline void on_close(std::function<void(uint16_t)> f)
-        {
-            on_close_cb = f;
-        }
+        inline void on_close(std::function<void(uint16_t)> f) { on_close_cb = f; }
 
         /*! \brief Handle incoming messages of several WebSockets in a loop. Blocks until the connection is dropped.
 
